@@ -14,6 +14,7 @@ import * as Sentry from "@sentry/node";
 import rateLimit from "express-rate-limit";
 import { v4 as uuidv4 } from "uuid";
 import { sendVerificationEmail, sendPasswordResetEmail, sendInvitationEmail, sendEmail } from "./services/email";
+import { getStripe, STRIPE_PLANS, PLAN_LIMITS } from "./services/stripe";
 import "express-async-errors";
 
 dotenv.config({ override: true });
@@ -37,16 +38,6 @@ const logger = pino({
 const prisma = new PrismaClient();
 const JWT_SECRET = process.env.GEMINI_API_KEY || "super-secret-key";
 const PORT = 3000;
-
-let stripeClient: Stripe | null = null;
-const getStripe = () => {
-  if (!stripeClient) {
-    stripeClient = new Stripe(process.env.STRIPE_SECRET_KEY || "sk_test_mock", {
-      apiVersion: "2025-01-27-preview.beta.v1" as any,
-    });
-  }
-  return stripeClient;
-};
 
 // Swagger Configuration
 const swaggerOptions = {
@@ -85,6 +76,107 @@ const swaggerSpec = swaggerJsdoc(swaggerOptions);
 
 async function startServer() {
   const app = express();
+  app.set('trust proxy', 1);
+
+  // Stripe Webhook - MUST be before express.json() to use express.raw()
+  app.post("/api/webhooks/stripe", express.raw({ type: "application/json" }), async (req, res) => {
+    const sig = req.headers["stripe-signature"] as string;
+    const stripe = getStripe();
+    let event;
+
+    try {
+      event = stripe.webhooks.constructEvent(
+        req.body,
+        sig,
+        process.env.STRIPE_WEBHOOK_SECRET || ""
+      );
+    } catch (err: any) {
+      logger.error(err, "Webhook signature verification failed");
+      return res.status(400).send(`Webhook Error: ${err.message}`);
+    }
+
+    // Handle the event
+    try {
+      switch (event.type) {
+        case "checkout.session.completed": {
+          const session = event.data.object as Stripe.Checkout.Session;
+          const companyId = parseInt(session.metadata?.companyId || "0");
+          if (companyId) {
+            await prisma.company.update({
+              where: { id: companyId },
+              data: {
+                stripeCustomerId: session.customer as string,
+                stripeSubscriptionId: session.subscription as string,
+                subscriptionStatus: "active",
+              },
+            });
+          }
+          break;
+        }
+        case "customer.subscription.updated":
+        case "customer.subscription.deleted": {
+          const subscription = event.data.object as any;
+          const company = await prisma.company.findFirst({
+            where: { stripeSubscriptionId: subscription.id },
+          });
+          if (company) {
+            const plan = (subscription.items.data[0].plan.metadata?.plan as string) || company.plan;
+            await (prisma.company as any).update({
+              where: { id: company.id },
+              data: {
+                subscriptionStatus: subscription.status,
+                plan: plan,
+                currentPeriodEnd: new Date(subscription.current_period_end * 1000),
+              },
+            });
+          }
+          break;
+        }
+        case "invoice.paid": {
+          const invoice = event.data.object as any;
+          const subscriptionId = typeof invoice.subscription === 'string' ? invoice.subscription : invoice.subscription?.id;
+          if (subscriptionId) {
+            const subscription = await stripe.subscriptions.retrieve(subscriptionId);
+            const company = await prisma.company.findFirst({
+              where: { stripeSubscriptionId: subscription.id },
+            });
+            if (company) {
+              await (prisma.company as any).update({
+                where: { id: company.id },
+                data: {
+                  subscriptionStatus: "active",
+                  currentPeriodEnd: new Date((subscription as any).current_period_end * 1000),
+                },
+              });
+            }
+          }
+          break;
+        }
+        case "invoice.payment_failed": {
+          const invoice = event.data.object as any;
+          const subscriptionId = typeof invoice.subscription === 'string' ? invoice.subscription : invoice.subscription?.id;
+          if (subscriptionId) {
+            const company = await prisma.company.findFirst({
+              where: { stripeSubscriptionId: subscriptionId },
+            });
+            if (company) {
+              await prisma.company.update({
+                where: { id: company.id },
+                data: { subscriptionStatus: "past_due" },
+              });
+            }
+          }
+          break;
+        }
+      }
+    } catch (err) {
+      logger.error(err, "Error processing webhook event");
+      return res.status(500).send("Internal Server Error");
+    }
+
+    res.json({ received: true });
+  });
+
   app.use(express.json());
 
   // Logging Middleware
@@ -128,25 +220,19 @@ async function startServer() {
 
     const now = new Date();
     const isTrialActive = company.trialEndsAt && company.trialEndsAt > now;
-    const isSubscriptionActive = company.subscriptionStatus === 'active';
+    const isSubscriptionActive = ['active', 'trialing'].includes(company.subscriptionStatus);
 
     if (!isTrialActive && !isSubscriptionActive) {
       return res.status(403).json({ 
         error: "Subscription required", 
         code: "SUBSCRIPTION_REQUIRED",
-        trialExpired: !isTrialActive && company.plan === 'trial'
+        trialExpired: !isTrialActive && company.plan === 'trial',
+        status: company.subscriptionStatus
       });
     }
 
     req.company = company;
     next();
-  };
-
-  const PLAN_LIMITS: Record<string, { products: number, users: number }> = {
-    trial: { products: 10, users: 2 },
-    starter: { products: 50, users: 5 },
-    pro: { products: 500, users: 20 },
-    business: { products: Infinity, users: Infinity },
   };
 
   const checkLimits = (resource: 'products' | 'users') => async (req: any, res: Response, next: NextFunction) => {
@@ -182,6 +268,7 @@ async function startServer() {
     message: { error: "Too many requests, please try again later." },
     standardHeaders: true,
     legacyHeaders: false,
+    validate: { xForwardedForHeader: false },
   });
 
   const createAuditLog = async (data: {
@@ -224,6 +311,12 @@ async function startServer() {
   app.post("/api/auth/register", authRateLimiter, async (req, res) => {
     const { companyName, email, password } = req.body;
     
+    // Check if user already exists
+    const existingUser = await prisma.user.findUnique({ where: { email } });
+    if (existingUser) {
+      return res.status(400).json({ error: "An account with this email already exists." });
+    }
+
     const trialEndsAt = new Date();
     trialEndsAt.setDate(trialEndsAt.getDate() + 14); // 14-day trial
 
@@ -249,12 +342,32 @@ async function startServer() {
         },
       });
 
+      await createAuditLog({
+        companyId: company.id,
+        userId: user.id,
+        action: 'REGISTER_COMPANY',
+        entityType: 'COMPANY',
+        entityId: company.id,
+        details: { companyName, email },
+      });
+
       return { companyId: company.id, userId: user.id, verificationToken };
     });
 
     // Send verification email
     const appUrl = process.env.APP_URL || `http://localhost:${PORT}`;
-    await sendVerificationEmail(email, result.verificationToken, appUrl);
+    try {
+      await sendVerificationEmail(email, result.verificationToken, appUrl);
+    } catch (emailError: any) {
+      logger.error({ email, error: emailError.message }, "Failed to send verification email during registration");
+      // If it's a validation error from Resend, we still want to inform the user but maybe they can still log in if we bypass verification for dev?
+      // For now, just log it and proceed, but warn the user.
+      return res.json({ 
+        success: true, 
+        message: "Registration successful, but we couldn't send the verification email. Please contact support if you cannot log in.",
+        warning: "EMAIL_SEND_FAILED"
+      });
+    }
 
     logger.info({ companyId: result.companyId, userId: result.userId }, "New company and admin registered. Verification email sent.");
     res.json({ success: true, message: "Registration successful. Please check your email to verify your account." });
@@ -295,7 +408,11 @@ async function startServer() {
       });
 
       const appUrl = process.env.APP_URL || `http://localhost:${PORT}`;
-      await sendPasswordResetEmail(email, token, appUrl);
+      try {
+        await sendPasswordResetEmail(email, token, appUrl);
+      } catch (emailError: any) {
+        logger.error({ email, error: emailError.message }, "Failed to send password reset email");
+      }
     }
 
     // Always return success to prevent email enumeration
@@ -358,7 +475,7 @@ async function startServer() {
     }
 
     const token = jwt.sign(
-      { id: user.id, companyId: user.companyId, role: user.role },
+      { id: user.id, companyId: user.companyId, role: user.role, email: user.email },
       JWT_SECRET,
       { expiresIn: "1d" }
     );
@@ -459,7 +576,7 @@ async function startServer() {
    *               brand: { type: string }
    *               description: { type: string }
    */
-  app.post("/api/products", authenticate, checkSubscription, checkLimits('products'), async (req: any, res) => {
+  app.post("/api/products", authenticate, checkSubscription, checkRole(['admin', 'manager']), checkLimits('products'), async (req: any, res) => {
     const { name, category, brand, description } = req.body;
     
     if (!name || !category) {
@@ -476,6 +593,12 @@ async function startServer() {
       },
     });
 
+    // Update onboarding flag
+    await prisma.company.update({
+      where: { id: req.user.companyId },
+      data: { hasCreatedProduct: true }
+    });
+
     await createAuditLog({
       companyId: req.user.companyId,
       userId: req.user.id,
@@ -487,6 +610,57 @@ async function startServer() {
 
     logger.info({ productId: product.id, companyId: req.user.companyId }, "Product created");
     res.json({ id: product.id });
+  });
+
+  app.patch("/api/products/:id", authenticate, checkSubscription, checkRole(['admin', 'manager']), async (req: any, res) => {
+    const { name, category, brand, description } = req.body;
+    const productId = parseInt(req.params.id);
+
+    const product = await prisma.product.update({
+      where: { id: productId, companyId: req.user.companyId },
+      data: { name, category, brand, description }
+    });
+
+    await createAuditLog({
+      companyId: req.user.companyId,
+      userId: req.user.id,
+      action: 'UPDATE_PRODUCT',
+      entityType: 'PRODUCT',
+      entityId: product.id,
+      details: { name, category },
+    });
+
+    res.json(product);
+  });
+
+  app.delete("/api/products/:id", authenticate, checkSubscription, checkRole(['admin']), async (req: any, res) => {
+    const productId = parseInt(req.params.id);
+
+    // Check if product has variations with stock
+    const variations = await prisma.variation.findMany({
+      where: { productId, companyId: req.user.companyId }
+    });
+
+    const hasStock = variations.some(v => v.stockCurrent > 0);
+    if (hasStock) {
+      return res.status(400).json({ error: "Cannot delete product with active stock. Please adjust stock to zero first." });
+    }
+
+    await prisma.$transaction(async (tx) => {
+      // Delete variations first (Prisma will handle this if onDelete: Cascade is set, but let's be safe)
+      await tx.variation.deleteMany({ where: { productId, companyId: req.user.companyId } });
+      await tx.product.delete({ where: { id: productId, companyId: req.user.companyId } });
+    });
+
+    await createAuditLog({
+      companyId: req.user.companyId,
+      userId: req.user.id,
+      action: 'DELETE_PRODUCT',
+      entityType: 'PRODUCT',
+      entityId: productId,
+    });
+
+    res.json({ success: true });
   });
 
   /**
@@ -530,7 +704,7 @@ async function startServer() {
    *               cost: { type: number }
    *               initialStock: { type: integer }
    */
-  app.post("/api/variations", authenticate, checkSubscription, async (req: any, res) => {
+  app.post("/api/variations", authenticate, checkSubscription, checkRole(['admin', 'manager']), async (req: any, res) => {
     const { productId, sku, size, color, price, cost, stockMin, initialStock } = req.body;
     
     if (!productId || !sku || price === undefined || cost === undefined) {
@@ -587,6 +761,68 @@ async function startServer() {
     }
   });
 
+  app.patch("/api/variations/:id", authenticate, checkSubscription, checkRole(['admin', 'manager']), async (req: any, res) => {
+    const { sku, size, color, price, cost, stockMin } = req.body;
+    const variationId = parseInt(req.params.id);
+
+    try {
+      const variation = await prisma.variation.update({
+        where: { id: variationId, companyId: req.user.companyId },
+        data: { 
+          sku, 
+          size, 
+          color, 
+          price: price !== undefined ? parseFloat(price) : undefined, 
+          cost: cost !== undefined ? parseFloat(cost) : undefined, 
+          stockMin: stockMin !== undefined ? parseInt(stockMin) : undefined 
+        }
+      });
+
+      await createAuditLog({
+        companyId: req.user.companyId,
+        userId: req.user.id,
+        action: 'UPDATE_VARIATION',
+        entityType: 'VARIATION',
+        entityId: variation.id,
+        details: { sku, size, color },
+      });
+
+      res.json(variation);
+    } catch (err: any) {
+      if (err.code === 'P2002') {
+        return res.status(400).json({ error: "SKU already exists for this company" });
+      }
+      throw err;
+    }
+  });
+
+  app.delete("/api/variations/:id", authenticate, checkSubscription, checkRole(['admin']), async (req: any, res) => {
+    const variationId = parseInt(req.params.id);
+
+    const variation = await prisma.variation.findFirst({
+      where: { id: variationId, companyId: req.user.companyId }
+    });
+
+    if (!variation) return res.status(404).json({ error: "Variation not found" });
+    if (variation.stockCurrent > 0) {
+      return res.status(400).json({ error: "Cannot delete variation with active stock." });
+    }
+
+    await prisma.variation.delete({
+      where: { id: variationId, companyId: req.user.companyId }
+    });
+
+    await createAuditLog({
+      companyId: req.user.companyId,
+      userId: req.user.id,
+      action: 'DELETE_VARIATION',
+      entityType: 'VARIATION',
+      entityId: variationId,
+    });
+
+    res.json({ success: true });
+  });
+
   /**
    * @openapi
    * /api/movements:
@@ -632,6 +868,12 @@ async function startServer() {
           quantity,
           performedBy: req.user.id,
         },
+      });
+
+      // Update onboarding flag
+      await tx.company.update({
+        where: { id: req.user.companyId },
+        data: { hasAddedStock: true }
       });
 
       await createAuditLog({
@@ -686,14 +928,24 @@ async function startServer() {
   app.get("/api/dashboard/low-stock", authenticate, checkSubscription, async (req: any, res) => {
     // In Prisma, we can't easily compare two columns in a where clause without raw SQL or computed fields
     // For simplicity in this demo, we'll fetch and filter, or use raw SQL
-    const items = await prisma.$queryRaw`
+    const items: any = await prisma.$queryRaw`
       SELECT v.*, p.name as product_name 
       FROM variations v 
       JOIN products p ON v.product_id = p.id 
       WHERE v.company_id = ${req.user.companyId} AND v.stock_current <= v.stock_min
       LIMIT 10
     `;
-    res.json(items);
+    
+    // Map snake_case to camelCase for the frontend
+    const mappedItems = items.map((item: any) => ({
+      ...item,
+      stockCurrent: item.stock_current,
+      stockMin: item.stock_min,
+      productId: item.product_id,
+      companyId: item.company_id
+    }));
+
+    res.json(mappedItems);
   });
 
   /**
@@ -890,12 +1142,215 @@ async function startServer() {
       },
     });
 
+    // Update onboarding flag
+    await prisma.company.update({
+      where: { id: req.user.companyId },
+      data: { hasInvitedMember: true }
+    });
+
     const appUrl = process.env.APP_URL || `http://localhost:${PORT}`;
-    await sendInvitationEmail(email, token, company?.name || 'Inventory Pro', appUrl);
+    try {
+      await sendInvitationEmail(email, token, company?.name || 'Inventory Pro', appUrl);
+    } catch (emailError: any) {
+      logger.error({ email, error: emailError.message }, "Failed to send invitation email");
+      return res.json({ 
+        success: true, 
+        message: "Invitation created, but we couldn't send the email. You can share the invitation token manually.",
+        token,
+        warning: "EMAIL_SEND_FAILED"
+      });
+    }
     
     logger.info({ invitationId: invitation.id, token }, "Invitation created and email sent.");
     
     res.json({ success: true, token });
+  });
+
+  // --- Company API ---
+  app.get("/api/company/details", authenticate, async (req: any, res) => {
+    const company = await prisma.company.findUnique({
+      where: { id: req.user.companyId },
+      include: {
+        _count: {
+          select: {
+            users: true,
+            products: true,
+          }
+        }
+      }
+    });
+    res.json(company);
+  });
+
+  /**
+   * @openapi
+   * /api/billing/create-checkout-session:
+   *   post:
+   *     summary: Create a Stripe Checkout session for subscription
+   *     tags: [Billing]
+   *     requestBody:
+   *       required: true
+   *       content:
+   *         application/json:
+   *           schema:
+   *             type: object
+   *             properties:
+   *               plan: { type: string }
+   */
+  app.post("/api/billing/create-checkout-session", authenticate, async (req: any, res) => {
+    const { plan } = req.body;
+    const stripe = getStripe();
+    const company = await prisma.company.findUnique({ where: { id: req.user.companyId } });
+    if (!company) return res.status(404).json({ error: "Company not found" });
+
+    const priceId = STRIPE_PLANS[plan as keyof typeof STRIPE_PLANS];
+    if (!priceId) return res.status(400).json({ error: "Invalid plan" });
+
+    const session = await stripe.checkout.sessions.create({
+      customer: company.stripeCustomerId || undefined,
+      customer_email: company.stripeCustomerId ? undefined : req.user.email,
+      payment_method_types: ["card"],
+      line_items: [
+        {
+          price: priceId,
+          quantity: 1,
+        },
+      ],
+      mode: "subscription",
+      success_url: `${process.env.APP_URL || 'http://localhost:3000'}/?view=billing&success=true`,
+      cancel_url: `${process.env.APP_URL || 'http://localhost:3000'}/?view=billing&canceled=true`,
+      metadata: {
+        companyId: company.id.toString(),
+      },
+      subscription_data: {
+        metadata: {
+          companyId: company.id.toString(),
+        },
+      },
+    });
+
+    res.json({ url: session.url });
+  });
+
+  /**
+   * @openapi
+   * /api/billing/create-portal-session:
+   *   post:
+   *     summary: Create a Stripe Customer Portal session
+   *     tags: [Billing]
+   */
+  app.post("/api/billing/create-portal-session", authenticate, async (req: any, res) => {
+    const stripe = getStripe();
+    const company = await prisma.company.findUnique({ where: { id: req.user.companyId } });
+    if (!company || !company.stripeCustomerId) {
+      return res.status(400).json({ error: "No active subscription found" });
+    }
+
+    const session = await stripe.billingPortal.sessions.create({
+      customer: company.stripeCustomerId,
+      return_url: `${process.env.APP_URL || 'http://localhost:3000'}/?view=billing`,
+    });
+
+    res.json({ url: session.url });
+  });
+
+  // --- Notifications API ---
+  app.get("/api/notifications", authenticate, async (req: any, res) => {
+    const notifications = await prisma.notification.findMany({
+      where: { 
+        companyId: req.user.companyId,
+        OR: [
+          { userId: null },
+          { userId: req.user.id }
+        ]
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 20
+    });
+    res.json(notifications);
+  });
+
+  app.patch("/api/notifications/:id/read", authenticate, async (req: any, res) => {
+    await prisma.notification.update({
+      where: { id: parseInt(req.params.id), companyId: req.user.companyId },
+      data: { readAt: new Date() }
+    });
+    res.json({ success: true });
+  });
+
+  // --- Onboarding API ---
+  app.get("/api/company/onboarding", authenticate, async (req: any, res) => {
+    const company = await prisma.company.findUnique({
+      where: { id: req.user.companyId },
+      select: {
+        onboardingCompleted: true,
+        hasCreatedProduct: true,
+        hasAddedStock: true,
+        hasInvitedMember: true
+      }
+    });
+    res.json(company);
+  });
+
+  app.patch("/api/company/onboarding/complete", authenticate, async (req: any, res) => {
+    await prisma.company.update({
+      where: { id: req.user.companyId },
+      data: { onboardingCompleted: true }
+    });
+    res.json({ success: true });
+  });
+
+  // --- Support API ---
+  app.post("/api/support/feedback", authenticate, async (req: any, res) => {
+    const { message, type } = req.body;
+    // In a real app, send to a support email or Slack
+    logger.info({ userId: req.user.id, companyId: req.user.companyId, message, type }, "User feedback received");
+    
+    await sendEmail({
+      to: 'support@inventorytailor.com',
+      subject: `New Feedback: ${type}`,
+      html: `
+        <p><strong>From:</strong> ${req.user.email}</p>
+        <p><strong>Type:</strong> ${type}</p>
+        <p><strong>Message:</strong> ${message}</p>
+      `
+    });
+
+    res.json({ success: true });
+  });
+
+  // --- Admin Insights API ---
+  app.get("/api/admin/insights", authenticate, async (req: any, res) => {
+    // Simple check for platform admin (e.g., specific email domain or superuser flag)
+    const userEmail = req.user?.email || '';
+    if (!userEmail.endsWith('@inventorytailor.com') && userEmail !== 'goln1iago@gmail.com') {
+      return res.status(403).json({ error: "Forbidden: Platform Admin only" });
+    }
+
+    const [totalCompanies, activeTrials, paidSubscriptions, totalUsers, totalProducts] = await Promise.all([
+      prisma.company.count(),
+      prisma.company.count({ where: { plan: 'trial', subscriptionStatus: 'active' } }),
+      prisma.company.count({ where: { plan: { not: 'trial' }, subscriptionStatus: 'active' } }),
+      prisma.user.count(),
+      prisma.product.count()
+    ]);
+
+    const recentCompanies = await prisma.company.findMany({
+      orderBy: { createdAt: 'desc' },
+      take: 10,
+      include: { _count: { select: { users: true, products: true } } }
+    });
+
+    res.json({
+      stats: {
+        totalCompanies,
+        activeTrials,
+        paidSubscriptions,
+        totalUsers,
+        totalProducts
+      },
+      recentCompanies
+    });
   });
 
   /**
@@ -917,6 +1372,12 @@ async function startServer() {
       return res.status(400).json({ error: "Invalid or expired invitation" });
     }
 
+    // Check if user already exists
+    const existingUser = await prisma.user.findUnique({ where: { email: invitation.email } });
+    if (existingUser) {
+      return res.status(400).json({ error: "A user with this email already exists. Please log in instead." });
+    }
+
     const hashedPassword = await bcrypt.hash(password, 10);
 
     const user = await prisma.$transaction(async (tx) => {
@@ -926,12 +1387,22 @@ async function startServer() {
           password: hashedPassword,
           role: invitation.role,
           companyId: invitation.companyId,
+          emailVerifiedAt: new Date(), // Invitations verify the email implicitly
         },
       });
 
       await tx.invitation.update({
         where: { id: invitation.id },
         data: { acceptedAt: new Date() },
+      });
+
+      await createAuditLog({
+        companyId: newUser.companyId,
+        userId: newUser.id,
+        action: 'ACCEPT_INVITATION',
+        entityType: 'USER',
+        entityId: newUser.id,
+        details: { email: newUser.email, role: newUser.role },
       });
 
       return newUser;
@@ -951,16 +1422,54 @@ async function startServer() {
   app.get("/api/audit-logs", authenticate, checkRole(['admin', 'manager']), async (req: any, res) => {
     const { page = 1, limit = 50 } = req.query;
     const skip = (parseInt(page) - 1) * parseInt(limit);
+    const take = parseInt(limit);
 
-    const logs = await prisma.auditLog.findMany({
-      where: { companyId: req.user.companyId },
-      include: { user: { select: { email: true } } },
-      orderBy: { createdAt: 'desc' },
-      skip,
-      take: parseInt(limit),
+    const [logs, total] = await Promise.all([
+      prisma.auditLog.findMany({
+        where: { companyId: req.user.companyId },
+        include: { user: { select: { email: true } } },
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take,
+      }),
+      prisma.auditLog.count({ where: { companyId: req.user.companyId } })
+    ]);
+
+    res.json({
+      data: logs,
+      total,
+      totalPages: Math.ceil(total / take),
+      page: parseInt(page)
+    });
+  });
+
+  app.delete("/api/company/users/:userId", authenticate, checkRole(['admin']), async (req: any, res) => {
+    const userId = parseInt(req.params.userId);
+
+    if (userId === req.user.id) {
+      return res.status(400).json({ error: "Cannot delete yourself" });
+    }
+
+    const user = await prisma.user.findFirst({
+      where: { id: userId, companyId: req.user.companyId }
     });
 
-    res.json(logs);
+    if (!user) return res.status(404).json({ error: "User not found" });
+
+    await prisma.user.delete({
+      where: { id: userId, companyId: req.user.companyId }
+    });
+
+    await createAuditLog({
+      companyId: req.user.companyId,
+      userId: req.user.id,
+      action: 'DELETE_USER',
+      entityType: 'USER',
+      entityId: userId,
+      details: { email: user.email },
+    });
+
+    res.json({ success: true });
   });
 
   /**

@@ -4,7 +4,7 @@ const resend = process.env.RESEND_API_KEY
   ? new Resend(process.env.RESEND_API_KEY) 
   : null;
 
-const FROM_EMAIL = 'Inventory Pro <onboarding@resend.dev>'; // Default Resend testing email
+const FROM_EMAIL = process.env.RESEND_FROM_EMAIL || 'Inventory Pro <onboarding@resend.dev>';
 
 export const sendEmail = async ({ to, subject, html }: { to: string, subject: string, html: string }) => {
   if (!resend) {
@@ -24,7 +24,10 @@ export const sendEmail = async ({ to, subject, html }: { to: string, subject: st
     });
 
     if (error) {
-      console.error('Resend Error:', error);
+      if (error.name === 'validation_error') {
+        console.error('Resend Validation Error: This usually means the "from" address is not verified or the "to" address is restricted on a trial account.');
+      }
+      console.error('Resend Error Details:', JSON.stringify(error, null, 2));
       throw error;
     }
 

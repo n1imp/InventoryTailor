@@ -21,13 +21,21 @@ model Company {
   plan                 String      @default("trial") // trial, starter, pro, business
   subscriptionStatus   String      @default("active") // active, past_due, canceled, trialing
   trialEndsAt          DateTime?   @map("trial_ends_at")
+  currentPeriodEnd     DateTime?   @map("current_period_end")
 
-  users       User[]
-  products    Product[]
-  variations  Variation[]
-  movements   Movement[]
-  auditLogs   AuditLog[]
-  invitations Invitation[]
+  // Onboarding
+  onboardingCompleted Boolean @default(false) @map("onboarding_completed")
+  hasCreatedProduct   Boolean @default(false) @map("has_created_product")
+  hasAddedStock       Boolean @default(false) @map("has_added_stock")
+  hasInvitedMember    Boolean @default(false) @map("has_invited_member")
+
+  users         User[]
+  products      Product[]
+  variations    Variation[]
+  movements     Movement[]
+  auditLogs     AuditLog[]
+  invitations   Invitation[]
+  notifications Notification[]
 
   @@map("companies")
 }
@@ -141,4 +149,18 @@ model Movement {
   user        User      @relation(fields: [performedBy], references: [id])
 
   @@map("movements")
+}
+
+model Notification {
+  id        Int      @id @default(autoincrement())
+  companyId Int      @map("company_id")
+  userId    Int?     @map("user_id") // Optional: specific user or all users in company
+  title     String
+  message   String
+  type      String   // 'info', 'warning', 'success', 'error'
+  readAt    DateTime? @map("read_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  company   Company  @relation(fields: [companyId], references: [id])
+
+  @@map("notifications")
 }

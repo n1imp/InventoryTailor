@@ -23,7 +23,12 @@ import {
   CreditCard,
   Download,
   Check,
-  Lock
+  Lock,
+  HelpCircle,
+  BarChart3,
+  Bell,
+  Edit,
+  Trash2
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
@@ -40,6 +45,23 @@ import {
   Cell
 } from 'recharts';
 import * as Sentry from "@sentry/react";
+import posthog from 'posthog-js';
+
+// Import New Components
+import { LandingPage } from './components/LandingPage';
+import { OnboardingChecklist } from './components/OnboardingChecklist';
+import { SupportSection } from './components/SupportSection';
+import { AdminInsights } from './components/AdminInsights';
+import { Notifications } from './components/Notifications';
+
+// Initialize PostHog
+if ((import.meta as any).env.VITE_POSTHOG_KEY) {
+  posthog.init((import.meta as any).env.VITE_POSTHOG_KEY, {
+    api_host: (import.meta as any).env.VITE_POSTHOG_HOST || 'https://app.posthog.com',
+    autocapture: true,
+    capture_pageview: true,
+  });
+}
 
 // Initialize Sentry Frontend
 if ((import.meta as any).env.VITE_SENTRY_DSN) {
@@ -111,8 +133,8 @@ interface Variation {
   color: string;
   price: number;
   cost: number;
-  stock_current: number;
-  stock_min: number;
+  stockCurrent: number;
+  stockMin: number;
   product_name?: string;
 }
 
@@ -396,16 +418,24 @@ const VerifyEmail = ({ onComplete }: { onComplete: () => void }) => {
   );
 };
 
-const ProductForm = ({ token, onSuccess, onCancel }: { token: string, onSuccess: () => void, onCancel: () => void }) => {
-  const [formData, setFormData] = useState({ name: '', category: '', brand: '', description: '' });
+const ProductForm = ({ token, product, onSuccess, onCancel }: { token: string, product?: Product | null, onSuccess: () => void, onCancel: () => void }) => {
+  const [formData, setFormData] = useState({ 
+    name: product?.name || '', 
+    category: product?.category || '', 
+    brand: product?.brand || '', 
+    description: product?.description || '' 
+  });
   const [loading, setLoading] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
     try {
-      const res = await fetch('/api/products', {
-        method: 'POST',
+      const url = product ? `/api/products/${product.id}` : '/api/products';
+      const method = product ? 'PATCH' : 'POST';
+      
+      const res = await fetch(url, {
+        method,
         headers: { 
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${token}`
@@ -416,10 +446,10 @@ const ProductForm = ({ token, onSuccess, onCancel }: { token: string, onSuccess:
         onSuccess();
       } else {
         const data = await res.json();
-        alert(data.error || 'Failed to create product');
+        alert(data.error || `Failed to ${product ? 'update' : 'create'} product`);
       }
     } catch (err) {
-      alert('Error creating product');
+      alert(`Error ${product ? 'updating' : 'creating'} product`);
     } finally {
       setLoading(false);
     }
@@ -477,16 +507,22 @@ const ProductForm = ({ token, onSuccess, onCancel }: { token: string, onSuccess:
           disabled={loading}
           className="flex-1 bg-[#141414] text-white py-2.5 text-xs font-bold uppercase tracking-widest hover:bg-[#141414]/90 disabled:opacity-50"
         >
-          {loading ? 'Creating...' : 'Create Product'}
+          {loading ? (product ? 'Updating...' : 'Creating...') : (product ? 'Update Product' : 'Create Product')}
         </button>
       </div>
     </form>
   );
 };
 
-const VariationForm = ({ token, productId, onSuccess, onCancel }: { token: string, productId: number, onSuccess: () => void, onCancel: () => void }) => {
+const VariationForm = ({ token, productId, variation, onSuccess, onCancel }: { token: string, productId: number, variation?: Variation | null, onSuccess: () => void, onCancel: () => void }) => {
   const [formData, setFormData] = useState({ 
-    sku: '', size: '', color: '', price: '', cost: '', stockMin: '0', initialStock: '0' 
+    sku: variation?.sku || '', 
+    size: variation?.size || '', 
+    color: variation?.color || '', 
+    price: variation?.price.toString() || '', 
+    cost: variation?.cost.toString() || '', 
+    stockMin: variation?.stockMin.toString() || '0', 
+    initialStock: '0' 
   });
   const [loading, setLoading] = useState(false);
 
@@ -494,8 +530,11 @@ const VariationForm = ({ token, productId, onSuccess, onCancel }: { token: strin
     e.preventDefault();
     setLoading(true);
     try {
-      const res = await fetch('/api/variations', {
-        method: 'POST',
+      const url = variation ? `/api/variations/${variation.id}` : '/api/variations';
+      const method = variation ? 'PATCH' : 'POST';
+
+      const res = await fetch(url, {
+        method,
         headers: { 
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${token}`
@@ -513,10 +552,10 @@ const VariationForm = ({ token, productId, onSuccess, onCancel }: { token: strin
         onSuccess();
       } else {
         const data = await res.json();
-        alert(data.error || 'Failed to create variation');
+        alert(data.error || `Failed to ${variation ? 'update' : 'create'} variation`);
       }
     } catch (err) {
-      alert('Error creating variation');
+      alert(`Error ${variation ? 'updating' : 'creating'} variation`);
     } finally {
       setLoading(false);
     }
@@ -606,7 +645,7 @@ const VariationForm = ({ token, productId, onSuccess, onCancel }: { token: strin
           disabled={loading}
           className="flex-1 bg-[#141414] text-white py-2.5 text-xs font-bold uppercase tracking-widest hover:bg-[#141414]/90 disabled:opacity-50"
         >
-          {loading ? 'Creating...' : 'Create Variation'}
+          {loading ? (variation ? 'Updating...' : 'Creating...') : (variation ? 'Update Variation' : 'Create Variation')}
         </button>
       </div>
     </form>
@@ -803,7 +842,7 @@ const LoginPage = ({ onLogin, onForgotPassword, onResetPassword }: { onLogin: (t
 };
 
 const Dashboard = ({ token, user, onLogout }: { token: string, user: User, onLogout: () => void }) => {
-  const [view, setView] = useState<'overview' | 'inventory' | 'users' | 'audit-logs' | 'billing'>('overview');
+  const [view, setView] = useState<'overview' | 'inventory' | 'users' | 'audit-logs' | 'billing' | 'support' | 'admin-insights'>('overview');
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
   const [analytics, setAnalytics] = useState<DashboardAnalytics | null>(null);
   const [products, setProducts] = useState<Product[]>([]);
@@ -819,7 +858,9 @@ const Dashboard = ({ token, user, onLogout }: { token: string, user: User, onLog
   const [companyUsers, setCompanyUsers] = useState<any[]>([]);
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
   const [activity, setActivity] = useState<AuditLog[]>([]);
+  const [companyDetails, setCompanyDetails] = useState<any>(null);
   const [company, setCompany] = useState<any>(null);
+  const [onboardingStatus, setOnboardingStatus] = useState<any>(null);
   
   const [loading, setLoading] = useState(true);
   const [subscriptionError, setSubscriptionError] = useState<any>(null);
@@ -827,6 +868,9 @@ const Dashboard = ({ token, user, onLogout }: { token: string, user: User, onLog
   const [isProductModalOpen, setIsProductModalOpen] = useState(false);
   const [isVariationModalOpen, setIsVariationModalOpen] = useState(false);
   const [isInviteModalOpen, setIsInviteModalOpen] = useState(false);
+  
+  const [editingProduct, setEditingProduct] = useState<Product | null>(null);
+  const [editingVariation, setEditingVariation] = useState<Variation | null>(null);
 
   useEffect(() => {
     fetchSummary();
@@ -835,13 +879,49 @@ const Dashboard = ({ token, user, onLogout }: { token: string, user: User, onLog
     fetchLowStock();
     fetchAnalytics();
     fetchActivity();
+    fetchOnboarding();
+    fetchCompany();
+    
+    // Track dashboard view
+    posthog.capture('dashboard_viewed', { view });
   }, []);
+
+  const fetchCompany = async () => {
+    try {
+      const res = await fetch('/api/company/details', {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setCompany(data);
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
 
   useEffect(() => {
     if (view === 'inventory') fetchProducts();
     if (view === 'users') fetchCompanyUsers();
     if (view === 'audit-logs') fetchAuditLogs();
+    if (view === 'billing') fetchCompanyDetails();
+    
+    posthog.capture('view_changed', { new_view: view });
   }, [view, pagination.page, search, categoryFilter]);
+
+  const fetchOnboarding = async () => {
+    try {
+      const res = await fetch('/api/company/onboarding', {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setOnboardingStatus(data);
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
 
   const fetchActivity = async () => {
     try {
@@ -851,6 +931,20 @@ const Dashboard = ({ token, user, onLogout }: { token: string, user: User, onLog
       if (!res.ok) return;
       const data = await res.json();
       setActivity(data);
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const fetchCompanyDetails = async () => {
+    try {
+      const res = await fetch('/api/company/details', {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setCompanyDetails(data);
+      }
     } catch (err) {
       console.error(err);
     }
@@ -892,14 +986,33 @@ const Dashboard = ({ token, user, onLogout }: { token: string, user: User, onLog
 
   const fetchAuditLogs = async () => {
     try {
-      const res = await fetch('/api/audit-logs', {
+      const res = await fetch(`/api/audit-logs?page=${pagination.page}`, {
         headers: { 'Authorization': `Bearer ${token}` }
       });
       if (!res.ok) return;
       const data = await res.json();
-      setAuditLogs(data);
+      setAuditLogs(data.data);
+      setPagination(prev => ({ ...prev, totalPages: data.totalPages }));
     } catch (err) {
       console.error(err);
+    }
+  };
+
+  const handleDeleteUser = async (userId: number) => {
+    if (!confirm('Are you sure you want to remove this user from the company?')) return;
+    try {
+      const res = await fetch(`/api/company/users/${userId}`, {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (res.ok) {
+        fetchCompanyUsers();
+      } else {
+        const data = await res.json();
+        alert(data.error || 'Failed to remove user');
+      }
+    } catch (err) {
+      alert('Error removing user');
     }
   };
 
@@ -953,6 +1066,13 @@ const Dashboard = ({ token, user, onLogout }: { token: string, user: User, onLog
       const res = await fetch(`/api/products?${query}`, {
         headers: { 'Authorization': `Bearer ${token}` }
       });
+      if (res.status === 403) {
+        const data = await res.json();
+        if (data.code === 'SUBSCRIPTION_REQUIRED') {
+          setSubscriptionError(data);
+        }
+        return;
+      }
       if (!res.ok) return;
       const data = await res.json();
       setProducts(data.data);
@@ -997,6 +1117,75 @@ const Dashboard = ({ token, user, onLogout }: { token: string, user: User, onLog
     }
   };
 
+  const handleExportCSV = async () => {
+    try {
+      const res = await fetch('/api/exports/inventory', {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (!res.ok) throw new Error('Export failed');
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `inventory-export-${new Date().toISOString().split('T')[0]}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      window.URL.revokeObjectURL(url);
+      document.body.removeChild(a);
+    } catch (err) {
+      alert('Failed to export CSV');
+    }
+  };
+
+  const handleDeleteProduct = async (productId: number) => {
+    if (!confirm('Are you sure you want to delete this product and all its variations?')) return;
+    try {
+      const res = await fetch(`/api/products/${productId}`, {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (res.ok) {
+        setSelectedProduct(null);
+        fetchProducts();
+        fetchSummary();
+      } else {
+        const data = await res.json();
+        alert(data.error || 'Failed to delete product');
+      }
+    } catch (err) {
+      alert('Error deleting product');
+    }
+  };
+
+  const handleDeleteVariation = async (variationId: number) => {
+    if (!confirm('Are you sure you want to delete this variation?')) return;
+    try {
+      const res = await fetch(`/api/variations/${variationId}`, {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (res.ok) {
+        if (selectedProduct) fetchVariations(selectedProduct.id);
+        fetchSummary();
+        fetchLowStock();
+      } else {
+        const data = await res.json();
+        alert(data.error || 'Failed to delete variation');
+      }
+    } catch (err) {
+      alert('Error deleting variation');
+    }
+  };
+
+  const getTrialDaysRemaining = () => {
+    if (!company?.trialEndsAt) return null;
+    const ends = new Date(company.trialEndsAt);
+    const now = new Date();
+    const diff = ends.getTime() - now.getTime();
+    const days = Math.ceil(diff / (1000 * 60 * 60 * 24));
+    return days > 0 ? days : 0;
+  };
+
   return (
     <div className="min-h-screen bg-[#E4E3E0] flex font-sans text-[#141414]">
       {/* Sidebar */}
@@ -1039,9 +1228,31 @@ const Dashboard = ({ token, user, onLogout }: { token: string, user: User, onLog
               Billing
             </button>
           )}
+          <button 
+            onClick={() => setView('support')}
+            className={`w-full flex items-center gap-3 px-4 py-3 text-sm font-medium transition-colors ${view === 'support' ? 'bg-[#141414] text-white' : 'hover:bg-[#141414]/5'}`}
+          >
+            <HelpCircle size={18} />
+            Support
+          </button>
+          {(user.email.endsWith('@inventorytailor.com') || user.email === 'goln1iago@gmail.com') && (
+            <button 
+              onClick={() => setView('admin-insights')}
+              className={`w-full flex items-center gap-3 px-4 py-3 text-sm font-medium transition-colors ${view === 'admin-insights' ? 'bg-[#141414] text-white' : 'hover:bg-[#141414]/5'}`}
+            >
+              <BarChart3 size={18} />
+              Platform Admin
+            </button>
+          )}
         </nav>
 
         <div className="p-4 border-t border-[#141414]">
+          {company?.plan === 'trial' && (
+            <div className="px-4 py-3 mb-2 bg-emerald-50 border border-emerald-200 rounded-md">
+              <p className="text-[10px] uppercase tracking-widest font-bold text-emerald-700">Trial Period</p>
+              <p className="text-xs font-bold text-emerald-800">{getTrialDaysRemaining()} days remaining</p>
+            </div>
+          )}
           <div className="px-4 py-3 mb-4">
             <p className="text-[10px] uppercase tracking-widest opacity-50">User</p>
             <p className="text-xs font-mono truncate">{user.email}</p>
@@ -1058,13 +1269,25 @@ const Dashboard = ({ token, user, onLogout }: { token: string, user: User, onLog
 
       {/* Main Content */}
       <main className="flex-1 overflow-auto">
+        {companyDetails?.subscriptionStatus === 'past_due' && (
+          <div className="bg-red-600 text-white px-8 py-2 text-center text-[10px] font-bold uppercase tracking-widest">
+            Payment failed. Please update your billing information to maintain access.
+            <button 
+              onClick={() => setView('billing')}
+              className="ml-4 underline"
+            >
+              Update Billing
+            </button>
+          </div>
+        )}
         <header className="h-16 border-b border-[#141414] bg-white flex items-center justify-between px-8 sticky top-0 z-10">
           <h2 className="text-sm font-bold uppercase tracking-widest">
             {view === 'overview' ? 'Dashboard Summary' : 'Product Catalog'}
           </h2>
           <div className="flex items-center gap-4">
+            <Notifications token={token} />
             <button 
-              onClick={() => window.open('/api/exports/inventory', '_blank')}
+              onClick={handleExportCSV}
               className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest border border-[#141414] px-3 py-1.5 hover:bg-[#141414]/5"
             >
               <Download size={12} /> Export CSV
@@ -1081,6 +1304,13 @@ const Dashboard = ({ token, user, onLogout }: { token: string, user: User, onLog
         </header>
 
         <div className="p-8">
+          {onboardingStatus && !onboardingStatus.onboardingCompleted && view === 'overview' && (
+            <OnboardingChecklist 
+              status={onboardingStatus} 
+              onAction={(newView) => setView(newView)} 
+            />
+          )}
+
           <AnimatePresence mode="wait">
             {view === 'overview' && (
               <motion.div 
@@ -1234,8 +1464,8 @@ const Dashboard = ({ token, user, onLogout }: { token: string, user: User, onLog
                                   {item.size} / {item.color}
                                 </td>
                                 <td className="p-3 text-right">
-                                  <span className="text-xs font-mono font-bold text-red-600">{item.stock_current}</span>
-                                  <span className="text-[10px] opacity-40 ml-1">/ {item.stock_min}</span>
+                                  <span className="text-xs font-mono font-bold text-red-600">{item.stockCurrent}</span>
+                                  <span className="text-[10px] opacity-40 ml-1">/ {item.stockMin}</span>
                                 </td>
                               </tr>
                             ))}
@@ -1321,7 +1551,10 @@ const Dashboard = ({ token, user, onLogout }: { token: string, user: User, onLog
                     <div className="flex justify-between items-center mb-2">
                       <h3 className="text-xs font-bold uppercase tracking-widest">Products</h3>
                       <button 
-                        onClick={() => setIsProductModalOpen(true)}
+                        onClick={() => {
+                          setEditingProduct(null);
+                          setIsProductModalOpen(true);
+                        }}
                         className="p-1.5 bg-[#141414] text-white rounded-md hover:scale-105 transition-transform"
                       >
                         <Plus size={14} />
@@ -1329,28 +1562,53 @@ const Dashboard = ({ token, user, onLogout }: { token: string, user: User, onLog
                     </div>
                     <div className="space-y-2">
                       {products.map(product => (
-                        <button 
+                        <div 
                           key={product.id}
                           onClick={() => {
                             setSelectedProduct(product);
                             fetchVariations(product.id);
                           }}
-                          className={`w-full text-left p-4 border transition-all ${selectedProduct?.id === product.id ? 'border-[#141414] bg-white shadow-[4px_4px_0px_0px_rgba(20,20,20,1)]' : 'border-transparent bg-white/50 hover:bg-white'}`}
+                          className={`w-full text-left p-4 border transition-all group cursor-pointer ${selectedProduct?.id === product.id ? 'border-[#141414] bg-white shadow-[4px_4px_0px_0px_rgba(20,20,20,1)]' : 'border-transparent bg-white/50 hover:bg-white'}`}
                         >
-                          <div className="flex gap-3">
-                            {product.images?.[0] ? (
-                              <img src={product.images[0].url} className="w-10 h-10 object-cover border border-[#141414]/10" />
-                            ) : (
-                              <div className="w-10 h-10 bg-[#141414]/5 flex items-center justify-center border border-[#141414]/10">
-                                <ImageIcon size={14} className="opacity-20" />
+                          <div className="flex justify-between items-start">
+                            <div className="flex gap-3">
+                              {product.images?.[0] ? (
+                                <img src={product.images[0].url} className="w-10 h-10 object-cover border border-[#141414]/10" referrerPolicy="no-referrer" />
+                              ) : (
+                                <div className="w-10 h-10 bg-[#141414]/5 flex items-center justify-center border border-[#141414]/10">
+                                  <ImageIcon size={14} className="opacity-20" />
+                                </div>
+                              )}
+                              <div>
+                                <p className="text-[10px] uppercase tracking-widest opacity-50 font-bold">{product.category}</p>
+                                <p className="font-bold text-sm">{product.name}</p>
                               </div>
-                            )}
-                            <div>
-                              <p className="text-[10px] uppercase tracking-widest opacity-50 font-bold">{product.category}</p>
-                              <p className="font-bold text-sm">{product.name}</p>
+                            </div>
+                            <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                              <button 
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setEditingProduct(product);
+                                  setIsProductModalOpen(true);
+                                }}
+                                className="p-1 hover:bg-[#141414]/5 rounded"
+                              >
+                                <Edit size={12} />
+                              </button>
+                              {user.role === 'admin' && (
+                                <button 
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleDeleteProduct(product.id);
+                                  }}
+                                  className="p-1 hover:bg-red-50 text-red-600 rounded"
+                                >
+                                  <Trash2 size={12} />
+                                </button>
+                              )}
                             </div>
                           </div>
-                        </button>
+                        </div>
                       ))}
                     </div>
 
@@ -1386,7 +1644,10 @@ const Dashboard = ({ token, user, onLogout }: { token: string, user: User, onLog
                           <p className="text-xs opacity-60">{selectedProduct.brand} • {selectedProduct.category}</p>
                         </div>
                         <button 
-                          onClick={() => setIsVariationModalOpen(true)}
+                          onClick={() => {
+                            setEditingVariation(null);
+                            setIsVariationModalOpen(true);
+                          }}
                           className="flex items-center gap-2 bg-[#141414] text-white px-4 py-2 text-xs font-bold uppercase tracking-widest hover:bg-[#141414]/90"
                         >
                           <Plus size={14} /> Add Variation
@@ -1413,13 +1674,22 @@ const Dashboard = ({ token, user, onLogout }: { token: string, user: User, onLog
                                 </td>
                                 <td className="p-4 text-xs font-mono text-right">${variant.price.toFixed(2)}</td>
                                 <td className="p-4 text-center">
-                                  <div className={`inline-flex items-center gap-2 px-2 py-1 rounded-md font-mono text-xs ${variant.stock_current <= variant.stock_min ? 'bg-red-50 text-red-600 font-bold' : 'bg-green-50 text-green-600'}`}>
-                                    {variant.stock_current}
-                                    {variant.stock_current <= variant.stock_min && <AlertTriangle size={10} />}
+                                  <div className={`inline-flex items-center gap-2 px-2 py-1 rounded-md font-mono text-xs ${variant.stockCurrent <= variant.stockMin ? 'bg-red-50 text-red-600 font-bold' : 'bg-green-50 text-green-600'}`}>
+                                    {variant.stockCurrent}
+                                    {variant.stockCurrent <= variant.stockMin && <AlertTriangle size={10} />}
                                   </div>
                                 </td>
                                 <td className="p-4 text-right">
                                   <div className="flex justify-end gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                                    <button 
+                                      onClick={() => {
+                                        setEditingVariation(variant);
+                                        setIsVariationModalOpen(true);
+                                      }}
+                                      className="p-1 hover:bg-[#141414]/5 rounded" title="Edit Variation"
+                                    >
+                                      <Edit size={16} />
+                                    </button>
                                     <button 
                                       onClick={() => handleAddMovement(variant.id, 'in', 1)}
                                       className="p-1 hover:bg-green-100 text-green-600 rounded" title="Add Stock"
@@ -1432,6 +1702,14 @@ const Dashboard = ({ token, user, onLogout }: { token: string, user: User, onLog
                                     >
                                       <ArrowDownLeft size={16} />
                                     </button>
+                                    {user.role === 'admin' && (
+                                      <button 
+                                        onClick={() => handleDeleteVariation(variant.id)}
+                                        className="p-1 hover:bg-red-100 text-red-600 rounded" title="Delete Variation"
+                                      >
+                                        <Trash2 size={16} />
+                                      </button>
+                                    )}
                                   </div>
                                 </td>
                               </tr>
@@ -1492,7 +1770,12 @@ const Dashboard = ({ token, user, onLogout }: { token: string, user: User, onLog
                           <td className="p-4 text-xs opacity-60">{new Date(u.createdAt).toLocaleDateString()}</td>
                           <td className="p-4 text-right">
                             {u.id !== user.id && (
-                              <button className="text-xs font-bold uppercase tracking-widest text-red-600 hover:underline">Remove</button>
+                              <button 
+                                onClick={() => handleDeleteUser(u.id)}
+                                className="text-xs font-bold uppercase tracking-widest text-red-600 hover:underline"
+                              >
+                                Remove
+                              </button>
                             )}
                           </td>
                         </tr>
@@ -1533,12 +1816,35 @@ const Dashboard = ({ token, user, onLogout }: { token: string, user: User, onLog
                             </span>
                           </td>
                           <td className="p-4 text-xs opacity-60">{log.entityType} #{log.entityId}</td>
-                          <td className="p-4 text-[10px] font-mono opacity-60 truncate max-w-xs">{log.details}</td>
+                          <td className="p-4 text-[10px] font-mono opacity-60 truncate max-w-xs" title={log.details}>
+                            {log.details && log.details.length > 50 ? log.details.substring(0, 50) + '...' : log.details}
+                          </td>
                         </tr>
                       ))}
                     </tbody>
                   </table>
                 </div>
+
+                {/* Pagination */}
+                {pagination.totalPages > 1 && (
+                  <div className="flex justify-center items-center gap-4 pt-4">
+                    <button 
+                      disabled={pagination.page === 1}
+                      onClick={() => setPagination({...pagination, page: pagination.page - 1})}
+                      className="p-2 border border-[#141414] disabled:opacity-20"
+                    >
+                      <ChevronLeft size={16} />
+                    </button>
+                    <span className="text-xs font-mono">{pagination.page} / {pagination.totalPages}</span>
+                    <button 
+                      disabled={pagination.page === pagination.totalPages}
+                      onClick={() => setPagination({...pagination, page: pagination.page + 1})}
+                      className="p-2 border border-[#141414] disabled:opacity-20"
+                    >
+                      <ChevronRight size={16} />
+                    </button>
+                  </div>
+                )}
               </motion.div>
             )}
             {view === 'billing' && (
@@ -1549,16 +1855,56 @@ const Dashboard = ({ token, user, onLogout }: { token: string, user: User, onLog
                 className="space-y-8"
               >
                 <div className="max-w-4xl mx-auto">
-                  <h3 className="text-xl font-serif italic font-bold mb-2">Subscription & Billing</h3>
-                  <p className="text-sm opacity-60 mb-8">Manage your company's plan and billing details.</p>
+                  <div className="flex justify-between items-end mb-8">
+                    <div>
+                      <h3 className="text-xl font-serif italic font-bold mb-2">Subscription & Billing</h3>
+                      <p className="text-sm opacity-60">Manage your company's plan and billing details.</p>
+                    </div>
+                    {companyDetails?.stripeCustomerId && (
+                      <button 
+                        onClick={async () => {
+                          const res = await fetch('/api/billing/create-portal-session', {
+                            method: 'POST',
+                            headers: { 'Authorization': `Bearer ${token}` }
+                          });
+                          const data = await res.json();
+                          if (data.url) window.location.href = data.url;
+                        }}
+                        className="px-4 py-2 border border-[#141414] text-xs font-bold uppercase tracking-widest hover:bg-[#141414]/5 flex items-center gap-2"
+                      >
+                        <CreditCard size={14} /> Manage Billing
+                      </button>
+                    )}
+                  </div>
+
+                  {companyDetails && (
+                    <div className="bg-[#141414] text-white p-6 mb-8 flex justify-between items-center">
+                      <div>
+                        <p className="text-[10px] uppercase tracking-widest opacity-50 font-bold mb-1">Current Plan</p>
+                        <h4 className="text-lg font-bold capitalize">{companyDetails.plan} Plan</h4>
+                      </div>
+                      <div className="text-right">
+                        <p className="text-[10px] uppercase tracking-widest opacity-50 font-bold mb-1">Status</p>
+                        <span className={`text-xs font-bold uppercase tracking-widest px-2 py-1 ${companyDetails.subscriptionStatus === 'active' ? 'bg-green-500' : 'bg-red-500'}`}>
+                          {companyDetails.subscriptionStatus}
+                        </span>
+                      </div>
+                      {companyDetails.currentPeriodEnd && (
+                        <div className="text-right">
+                          <p className="text-[10px] uppercase tracking-widest opacity-50 font-bold mb-1">Next Billing Date</p>
+                          <p className="text-sm font-mono">{new Date(companyDetails.currentPeriodEnd).toLocaleDateString()}</p>
+                        </div>
+                      )}
+                    </div>
+                  )}
 
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
                     {[
-                      { name: 'Starter', price: '$29', features: ['Up to 5 Users', '1,000 Products', 'Basic Analytics'], id: 'starter' },
-                      { name: 'Pro', price: '$79', features: ['Up to 20 Users', '10,000 Products', 'Advanced Analytics', 'Priority Support'], id: 'pro' },
-                      { name: 'Business', price: '$199', features: ['Unlimited Users', 'Unlimited Products', 'Custom Reports', 'API Access'], id: 'business' },
+                      { name: 'Starter', price: '$29', features: ['Up to 5 Users', '20 Products', 'Basic Analytics'], id: 'starter' },
+                      { name: 'Pro', price: '$79', features: ['Up to 15 Users', '100 Products', 'Advanced Analytics', 'Priority Support'], id: 'pro' },
+                      { name: 'Business', price: '$199', features: ['Up to 50 Users', '1,000 Products', 'Custom Reports', 'API Access'], id: 'business' },
                     ].map(plan => (
-                      <div key={plan.id} className="bg-white border border-[#141414] p-8 shadow-[8px_8px_0px_0px_rgba(20,20,20,1)] flex flex-col">
+                      <div key={plan.id} className={`bg-white border border-[#141414] p-8 shadow-[8px_8px_0px_0px_rgba(20,20,20,1)] flex flex-col ${companyDetails?.plan === plan.id ? 'ring-2 ring-offset-2 ring-[#141414]' : ''}`}>
                         <h4 className="text-lg font-bold mb-1">{plan.name}</h4>
                         <div className="flex items-baseline gap-1 mb-6">
                           <span className="text-3xl font-mono font-bold">{plan.price}</span>
@@ -1572,23 +1918,47 @@ const Dashboard = ({ token, user, onLogout }: { token: string, user: User, onLog
                           ))}
                         </ul>
                         <button 
+                          disabled={companyDetails?.plan === plan.id}
                           onClick={async () => {
-                            const res = await fetch('/api/billing/checkout', {
+                            const res = await fetch('/api/billing/create-checkout-session', {
                               method: 'POST',
                               headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
                               body: JSON.stringify({ plan: plan.id })
                             });
                             const data = await res.json();
-                            if (data.url) window.location.href = data.url;
+                            if (data.url) {
+                              posthog.capture('subscription_upgrade_started', { plan: plan.id });
+                              window.location.href = data.url;
+                            }
                           }}
-                          className="w-full bg-[#141414] text-white py-3 text-xs font-bold uppercase tracking-widest hover:bg-[#141414]/90"
+                          className={`w-full py-3 text-xs font-bold uppercase tracking-widest transition-colors ${companyDetails?.plan === plan.id ? 'bg-gray-100 text-gray-400 cursor-not-allowed' : 'bg-[#141414] text-white hover:bg-[#141414]/90'}`}
                         >
-                          Upgrade to {plan.name}
+                          {companyDetails?.plan === plan.id ? 'Current Plan' : `Select ${plan.name}`}
                         </button>
                       </div>
                     ))}
                   </div>
                 </div>
+              </motion.div>
+            )}
+
+            {view === 'support' && (
+              <motion.div 
+                key="support"
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+              >
+                <SupportSection token={token} />
+              </motion.div>
+            )}
+
+            {view === 'admin-insights' && (
+              <motion.div 
+                key="admin-insights"
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+              >
+                <AdminInsights token={token} />
               </motion.div>
             )}
 
@@ -1622,10 +1992,11 @@ const Dashboard = ({ token, user, onLogout }: { token: string, user: User, onLog
       <Modal 
         isOpen={isProductModalOpen} 
         onClose={() => setIsProductModalOpen(false)} 
-        title="Create New Product"
+        title={editingProduct ? "Edit Product" : "Create New Product"}
       >
         <ProductForm 
           token={token} 
+          product={editingProduct}
           onSuccess={() => {
             setIsProductModalOpen(false);
             fetchProducts();
@@ -1637,12 +2008,13 @@ const Dashboard = ({ token, user, onLogout }: { token: string, user: User, onLog
       <Modal 
         isOpen={isVariationModalOpen} 
         onClose={() => setIsVariationModalOpen(false)} 
-        title={`Add Variation to ${selectedProduct?.name}`}
+        title={editingVariation ? `Edit Variation` : `Add Variation to ${selectedProduct?.name}`}
       >
         {selectedProduct && (
           <VariationForm 
             token={token}
             productId={selectedProduct.id}
+            variation={editingVariation}
             onSuccess={() => {
               setIsVariationModalOpen(false);
               fetchVariations(selectedProduct.id);
@@ -1688,36 +2060,51 @@ export default function App() {
     setRoute(path);
   };
 
-  const handleLogin = (token: string, user: User) => {
-    setToken(token);
-    setUser(user);
-    localStorage.setItem('it_token', token);
-    localStorage.setItem('it_user', JSON.stringify(user));
-    navigate('/');
+  const handleLogin = (newToken: string, newUser: User) => {
+    localStorage.setItem('it_token', newToken);
+    localStorage.setItem('it_user', JSON.stringify(newUser));
+    setToken(newToken);
+    setUser(newUser);
+    
+    // Identify user in PostHog
+    posthog.identify(newUser.id.toString(), {
+      email: newUser.email,
+      companyId: newUser.companyId
+    });
+    posthog.capture('user_logged_in');
+    
+    navigate('/dashboard');
   };
 
   const handleLogout = () => {
-    setToken(null);
-    setUser(null);
     localStorage.removeItem('it_token');
     localStorage.removeItem('it_user');
+    setToken(null);
+    setUser(null);
+    posthog.reset();
     navigate('/');
   };
 
   // Routing
   if (route === '/verify-email') {
-    return <VerifyEmail onComplete={() => navigate('/')} />;
+    return <VerifyEmail onComplete={() => navigate('/login')} />;
   }
 
   if (route === '/reset-password') {
-    return <ResetPassword onBack={() => navigate('/')} />;
+    return <ResetPassword onBack={() => navigate('/login')} />;
   }
 
   if (route === '/forgot-password') {
-    return <ForgotPassword onBack={() => navigate('/')} />;
+    return <ForgotPassword onBack={() => navigate('/login')} />;
   }
 
-  if (!token || !user) {
+  if (token && user) {
+    if (route === '/dashboard' || route === '/') {
+      return <Dashboard token={token} user={user} onLogout={handleLogout} />;
+    }
+  }
+
+  if (route === '/login') {
     return (
       <LoginPage 
         onLogin={handleLogin} 
@@ -1727,5 +2114,10 @@ export default function App() {
     );
   }
 
-  return <Dashboard token={token} user={user} onLogout={handleLogout} />;
+  return (
+    <LandingPage 
+      onGetStarted={() => navigate('/login')} 
+      onLogin={() => navigate('/login')} 
+    />
+  );
 }
