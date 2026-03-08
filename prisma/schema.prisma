@@ -1,0 +1,144 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Company {
+  id                 Int         @id @default(autoincrement())
+  name               String
+  createdAt          DateTime    @default(now()) @map("created_at")
+
+  // SaaS Fields
+  stripeCustomerId     String?     @map("stripe_customer_id")
+  stripeSubscriptionId String?     @map("stripe_subscription_id")
+  plan                 String      @default("trial") // trial, starter, pro, business
+  subscriptionStatus   String      @default("active") // active, past_due, canceled, trialing
+  trialEndsAt          DateTime?   @map("trial_ends_at")
+
+  users       User[]
+  products    Product[]
+  variations  Variation[]
+  movements   Movement[]
+  auditLogs   AuditLog[]
+  invitations Invitation[]
+
+  @@map("companies")
+}
+
+model User {
+  id                    Int          @id @default(autoincrement())
+  companyId             Int          @map("company_id")
+  email                 String       @unique
+  password              String
+  role                  String       @default("admin") // admin, manager, staff
+  emailVerifiedAt       DateTime?    @map("email_verified_at")
+  verificationToken     String?      @map("verification_token")
+  resetPasswordToken    String?      @map("reset_password_token")
+  resetPasswordExpiresAt DateTime?   @map("reset_password_expires_at")
+  createdAt             DateTime     @default(now()) @map("created_at")
+  company               Company      @relation(fields: [companyId], references: [id])
+  movements             Movement[]
+  auditLogs             AuditLog[]
+  invitations           Invitation[] @relation("InvitedBy")
+
+  @@map("users")
+}
+
+model Product {
+  id          Int            @id @default(autoincrement())
+  companyId   Int            @map("company_id")
+  name        String
+  description String?
+  brand       String?
+  category    String?
+  createdAt   DateTime       @default(now()) @map("created_at")
+  company     Company        @relation(fields: [companyId], references: [id])
+  variations  Variation[]
+  images      ProductImage[]
+
+  @@map("products")
+}
+
+model ProductImage {
+  id        Int      @id @default(autoincrement())
+  productId Int      @map("product_id")
+  url       String
+  isMain    Boolean  @default(false) @map("is_main")
+  createdAt DateTime @default(now()) @map("created_at")
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@map("product_images")
+}
+
+model AuditLog {
+  id         Int      @id @default(autoincrement())
+  companyId  Int      @map("company_id")
+  userId     Int      @map("user_id")
+  action     String   // e.g., 'CREATE_PRODUCT', 'UPDATE_STOCK', 'DELETE_VARIATION'
+  entityType String   @map("entity_type") // e.g., 'PRODUCT', 'VARIATION', 'MOVEMENT'
+  entityId   Int?     @map("entity_id")
+  details    String?  // JSON string for additional info
+  createdAt  DateTime @default(now()) @map("created_at")
+  company    Company  @relation(fields: [companyId], references: [id])
+  user       User     @relation(fields: [userId], references: [id])
+
+  @@map("audit_logs")
+}
+
+model Invitation {
+  id         Int      @id @default(autoincrement())
+  companyId  Int      @map("company_id")
+  email      String
+  role       String   @default("staff")
+  token      String   @unique
+  invitedBy  Int      @map("invited_by")
+  expiresAt  DateTime @map("expires_at")
+  acceptedAt DateTime? @map("accepted_at")
+  createdAt  DateTime @default(now()) @map("created_at")
+  company    Company  @relation(fields: [companyId], references: [id])
+  inviter    User     @relation("InvitedBy", fields: [invitedBy], references: [id])
+
+  @@map("invitations")
+}
+
+model Variation {
+  id           Int        @id @default(autoincrement())
+  productId    Int        @map("product_id")
+  companyId    Int        @map("company_id")
+  sku          String
+  size         String?
+  color        String?
+  price        Float
+  cost         Float
+  stockCurrent Int        @default(0) @map("stock_current")
+  stockMin     Int        @default(0) @map("stock_min")
+  createdAt    DateTime   @default(now()) @map("created_at")
+  product      Product    @relation(fields: [productId], references: [id])
+  company      Company    @relation(fields: [companyId], references: [id])
+  movements    Movement[]
+
+  @@unique([companyId, sku])
+  @@map("variations")
+}
+
+model Movement {
+  id          Int       @id @default(autoincrement())
+  companyId   Int       @map("company_id")
+  variationId Int       @map("variation_id")
+  type        String    // 'in', 'out', 'sale', 'purchase', 'loss'
+  quantity    Int
+  performedBy Int       @map("performed_by")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  company     Company   @relation(fields: [companyId], references: [id])
+  variation   Variation @relation(fields: [variationId], references: [id])
+  user        User      @relation(fields: [performedBy], references: [id])
+
+  @@map("movements")
+}

@@ -1,0 +1,5 @@
+{
+  "name": "InventoryTailor",
+  "description": "A production-ready surgical multi-tenant inventory management system with PostgreSQL, Prisma ORM, Docker support, and Swagger API documentation.",
+  "requestFramePermissions": []
+}
